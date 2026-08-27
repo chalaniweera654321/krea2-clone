@@ -14,6 +14,7 @@ import tempfile
 import traceback
 import uuid
 from typing import Any
+import time
 
 import gradio as gr
 from huggingface_hub import hf_hub_download
@@ -2183,6 +2184,7 @@ def generate(
 
     staged: list[pathlib.Path] = []
 
+    total_start = time.time()
 
     try:
 
@@ -2448,7 +2450,7 @@ def generate(
             custom_loras=[],
         )
 
-
+        t0 = time.time()
         progress(
             0.35,
             desc=f"generating {mode}",
@@ -2491,7 +2493,7 @@ def generate(
                 str(destination)
             )
 
-
+        print(f"⏱️ Total: "f"{time.time() - total_start:.1f}s")
         return (
             output_paths,
             (
