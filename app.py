@@ -865,14 +865,15 @@ def _init_comfy_nodes() -> None:
     import nodes
     import server
 
-
+    from app.assets.manager import default_asset_manager
     loop = asyncio.new_event_loop()
 
     asyncio.set_event_loop(loop)
 
 
     server_instance = server.PromptServer(
-        loop
+        loop,
+        default_asset_manager()
     )
 
 
@@ -1845,7 +1846,8 @@ def _execute_workflow(
 
 
     server_instance = server.PromptServer(
-        loop
+        loop,
+        default_asset_manager()
     )
 
 
