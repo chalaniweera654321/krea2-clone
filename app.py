@@ -27,36 +27,30 @@ from pathlib import Path
 # ============================================================================
 
 def _upload_to_mega(file_path: str) -> str:
-    """Upload one generated image to MEGA using environment secrets."""
+    """Upload generated image to MEGA root folder."""
     email = os.environ.get("MEGA_EMAIL")
     password = os.environ.get("MEGA_PASSWORD")
-    folder_name = os.environ.get("MEGA_FOLDER", "Krea2-Outputs").strip()
 
     if not email or not password:
         raise RuntimeError(
-            "Missing MEGA_EMAIL or MEGA_PASSWORD in the Spaces secrets/environment."
+            "Missing MEGA_EMAIL or MEGA_PASSWORD in Spaces secrets."
         )
 
     try:
         from mega import Mega
     except ImportError as exc:
         raise RuntimeError(
-            "MEGA uploader is not installed. Add mega.py-v2 to requirements.txt."
+            "Install mega.py-v2 in requirements.txt."
         ) from exc
 
     mega = Mega()
     account = mega.login(email, password)
 
-    # Reuse the destination folder when it exists; otherwise create it.
-    folder = None
-    if folder_name:
-        existing = account.find(folder_name)
-        if existing:
-            folder = existing[0] if isinstance(existing, list) else existing
-        else:
-            folder = account.create_folder(folder_name)
+    # Upload directly to the MEGA root directory.
+    uploaded = account.upload(file_path)
 
-    uploaded = account.upload(file_path, folder) if folder else account.upload(file_path)
+    print(f"[mega] uploaded: {file_path}", flush=True)
+
     return str(uploaded)
 
 
