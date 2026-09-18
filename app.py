@@ -23,6 +23,44 @@ from pathlib import Path
 
 
 # ============================================================================
+# MEGA UPLOAD
+# ============================================================================
+
+def _upload_to_mega(file_path: str) -> str:
+    """Upload one generated image to MEGA using environment secrets."""
+    email = os.environ.get("MEGA_EMAIL")
+    password = os.environ.get("MEGA_PASSWORD")
+    folder_name = os.environ.get("MEGA_FOLDER", "Krea2-Outputs").strip()
+
+    if not email or not password:
+        raise RuntimeError(
+            "Missing MEGA_EMAIL or MEGA_PASSWORD in the Spaces secrets/environment."
+        )
+
+    try:
+        from mega import Mega
+    except ImportError as exc:
+        raise RuntimeError(
+            "MEGA uploader is not installed. Add mega.py-v2 to requirements.txt."
+        ) from exc
+
+    mega = Mega()
+    account = mega.login(email, password)
+
+    # Reuse the destination folder when it exists; otherwise create it.
+    folder = None
+    if folder_name:
+        existing = account.find(folder_name)
+        if existing:
+            folder = existing[0] if isinstance(existing, list) else existing
+        else:
+            folder = account.create_folder(folder_name)
+
+    uploaded = account.upload(file_path, folder) if folder else account.upload(file_path)
+    return str(uploaded)
+
+
+# ============================================================================
 # SPACES COMPATIBILITY
 # ============================================================================
 
@@ -2494,12 +2532,19 @@ def generate(
                 str(destination)
             )
 
+        # Upload the final metadata-preserving images to MEGA.
+        mega_results: list[str] = []
+        for output_path in output_paths:
+            mega_results.append(_upload_to_mega(output_path))
+
+        print(f"[mega] uploaded {len(mega_results)} image(s)", flush=True)
         print(f"⏱️ Total: "f"{time.time() - total_start:.1f}s")
         return (
             output_paths,
             (
                 f"done — "
                 f"{len(output_paths)} image(s), "
+                f"uploaded to MEGA folder '{os.environ.get('MEGA_FOLDER', 'Krea2-Outputs')}' — "
                 f"seed {effective_seed}"
             ),
             effective_seed,
