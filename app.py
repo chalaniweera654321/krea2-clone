@@ -33,6 +33,7 @@ _MEGA_UPLOAD_LOCK = threading.Lock()
 
 def _mega_login():
     """Log in to MEGA once at application startup and fail early if invalid."""
+
     email = os.environ.get("MEGA_EMAIL")
     password = os.environ.get("MEGA_PASSWORD")
 
@@ -51,77 +52,114 @@ def _mega_login():
 
     try:
         account = Mega().login(email, password)
-        # Force a real authenticated request so invalid credentials are
-        # detected before ComfyUI setup and before the Gradio UI is created.
+
+        # Force a real authenticated request.
         account.get_files()
+
     except Exception as exc:
         raise RuntimeError(
             "MEGA login verification failed. Check MEGA_EMAIL, "
             "MEGA_PASSWORD, and the installed MEGA package."
         ) from exc
 
-    print("[mega] login verification successful", flush=True)
+    print(
+        "[mega] login verification successful",
+        flush=True,
+    )
+
     return account
 
 
 def _mega_remote_filenames(account) -> set[str]:
-    """Return all filenames currently visible in the MEGA account."""
+
     files = account.get_files() or {}
+
     names: set[str] = set()
 
     for node in files.values():
+
         if not isinstance(node, dict):
             continue
+
         attrs = node.get("a", {})
+
         if isinstance(attrs, dict):
+
             name = attrs.get("n")
+
             if isinstance(name, str) and name:
                 names.add(name)
 
     return names
 
 
-def _unique_mega_filename(existing_names: set[str], extension: str = ".png") -> str:
-    """Create the requested timestamp filename and avoid collisions."""
-    timestamp = datetime.now().strftime("Image %b %d, %Y, %I_%M_%S %p")
+def _unique_mega_filename(
+    existing_names: set[str],
+    extension: str = ".png",
+) -> str:
+
+    timestamp = datetime.now().strftime(
+        "Image %b %d, %Y, %I_%M_%S %p"
+    )
+
     base = f"{timestamp}{extension}"
 
     if base not in existing_names:
         return base
 
     counter = 1
+
     while True:
-        candidate = f"{timestamp}_{counter:03d}{extension}"
+
+        candidate = (
+            f"{timestamp}_{counter:03d}{extension}"
+        )
+
         if candidate not in existing_names:
             return candidate
+
         counter += 1
 
 
-def _upload_to_mega(file_path: str, account) -> str:
-    """Upload a generated image to MEGA with a collision-safe filename."""
+def _upload_to_mega(
+    file_path: str,
+    account,
+) -> str:
+
     path = pathlib.Path(file_path)
+
     if not path.is_file():
-        raise FileNotFoundError(f"Generated file does not exist: {file_path}")
+
+        raise FileNotFoundError(
+            f"Generated file does not exist: {file_path}"
+        )
 
     with _MEGA_UPLOAD_LOCK:
-        existing_names = _mega_remote_filenames(account)
+
+        existing_names = _mega_remote_filenames(
+            account
+        )
+
         filename = _unique_mega_filename(
             existing_names,
             extension=path.suffix or ".png",
         )
 
-        # mega.py supports dest_filename for naming the uploaded remote file.
         uploaded = account.upload(
             str(path),
             dest=None,
             dest_filename=filename,
         )
 
-        print(f"[mega] uploaded: {filename}", flush=True)
+        print(
+            f"[mega] uploaded: {filename}",
+            flush=True,
+        )
+
         return str(uploaded)
 
 
-# Verify MEGA before any ComfyUI setup, model scanning, or UI creation.
+# Verify MEGA before ComfyUI setup.
 MEGA_ACCOUNT = _mega_login()
 
 
@@ -130,7 +168,9 @@ MEGA_ACCOUNT = _mega_login()
 # ============================================================================
 
 try:
+
     import spaces
+
 except ImportError:
 
     class _SpacesFallback:
@@ -169,64 +209,90 @@ def _detect_comfy_root() -> pathlib.Path:
 
     # Case 1:
     # app.py is directly inside ComfyUI.
+
     if (
         (ROOT / "main.py").is_file()
         and (ROOT / "models").is_dir()
     ):
+
         return ROOT
+
 
     # Case 2:
     # ComfyUI is a child of the application directory.
+
     candidate = ROOT / "ComfyUI"
 
     if (
         (candidate / "main.py").is_file()
         and (candidate / "models").is_dir()
     ):
+
         return candidate
 
+
     # Case 3:
-    # /content/ComfyUI is the standard Colab location.
-    candidate = pathlib.Path("/content/ComfyUI")
+    # /content/ComfyUI
+
+    candidate = pathlib.Path(
+        "/content/ComfyUI"
+    )
 
     if (
         (candidate / "main.py").is_file()
         and (candidate / "models").is_dir()
     ):
+
         return candidate
 
+
     # Last resort.
+
     return ROOT / "ComfyUI"
 
 
 COMFY = _detect_comfy_root()
 
-MODELS = Path("/mnt/krea2-models")
+MODELS = Path(
+    "/mnt/krea2-models"
+)
 
 import folder_paths
 
+
 folder_paths.add_model_folder_path(
     "diffusion_models",
-    str(MODELS / "diffusion_models")
+    str(
+        MODELS / "diffusion_models"
+    ),
 )
 
 folder_paths.add_model_folder_path(
     "loras",
-    str(MODELS / "loras")
+    str(
+        MODELS / "loras"
+    ),
 )
 
 folder_paths.add_model_folder_path(
     "vae",
-    str(MODELS / "vae")
+    str(
+        MODELS / "vae"
+    ),
 )
 
 folder_paths.add_model_folder_path(
     "text_encoders",
-    str(MODELS / "text_encoders")
+    str(
+        MODELS / "text_encoders"
+    ),
 )
 
+
 INPUT = COMFY / "input"
+
 OUTPUT = COMFY / "output"
+
 CUSTOM_NODES = COMFY / "custom_nodes"
 
 
@@ -250,11 +316,74 @@ print(
 
 
 # ============================================================================
+# GENERATION DEBUG LOGGING
+# ============================================================================
+
+_GENERATION_LOG_LOCK = threading.Lock()
+
+
+def _gen_log(
+    message: str,
+) -> None:
+
+    """
+    Timestamped logging specifically for the
+    Generate button workflow.
+    """
+
+    now = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )[:-3]
+
+    with _GENERATION_LOG_LOCK:
+
+        print(
+            f"[GENERATE {now}] {message}",
+            flush=True,
+        )
+
+
+def _gen_log_step(
+    step: str,
+    start_time: float | None = None,
+) -> float:
+
+    """
+    Log a generation step.
+
+    If start_time is provided, also print elapsed time.
+    """
+
+    now = time.time()
+
+    if start_time is None:
+
+        _gen_log(
+            f">>> {step}"
+        )
+
+    else:
+
+        _gen_log(
+            f">>> {step} "
+            f"(elapsed: "
+            f"{now - start_time:.3f}s)"
+        )
+
+    return now
+
+
+# ============================================================================
 # WORKFLOW FILES
 # ============================================================================
 
-T2I_SOURCE = ROOT / "lustifyWorkflowsKrea2_krea2.json"
-EDIT_SOURCE = ROOT / "lustifyWorkflowsKrea2_krea2Edit.json"
+T2I_SOURCE = (
+    ROOT / "lustifyWorkflowsKrea2_krea2.json"
+)
+
+EDIT_SOURCE = (
+    ROOT / "lustifyWorkflowsKrea2_krea2Edit.json"
+)
 
 
 # ============================================================================
@@ -270,9 +399,13 @@ KREA_EDIT_NODES = (
 # IDENTITY ADAPTER
 # ============================================================================
 
-IDENTITY_REPO = "conradlocke/krea2-identity-edit"
+IDENTITY_REPO = (
+    "conradlocke/krea2-identity-edit"
+)
 
-IDENTITY_FILE = "krea2_identity_edit_v1_2.safetensors"
+IDENTITY_FILE = (
+    "krea2_identity_edit_v1_2.safetensors"
+)
 
 IDENTITY_LORA_DIR = (
     MODELS / "loras" / "krea"
@@ -282,23 +415,33 @@ IDENTITY_LORA_PATH = (
     IDENTITY_LORA_DIR / IDENTITY_FILE
 )
 
-IDENTITY_COMFY_NAME = pathlib.PurePosixPath(
-    "krea",
-    IDENTITY_FILE,
-).as_posix()
+IDENTITY_COMFY_NAME = (
+    pathlib.PurePosixPath(
+        "krea",
+        IDENTITY_FILE,
+    ).as_posix()
+)
 
 
 # ============================================================================
 # LOCAL MODEL DIRECTORIES
 # ============================================================================
 
-TEXT_ENCODER_DIR = MODELS / "text_encoders"
+TEXT_ENCODER_DIR = (
+    MODELS / "text_encoders"
+)
 
-VAE_DIR = MODELS / "vae"
+VAE_DIR = (
+    MODELS / "vae"
+)
 
-DIFFUSION_DIR = MODELS / "diffusion_models"
+DIFFUSION_DIR = (
+    MODELS / "diffusion_models"
+)
 
-LORA_ROOT = MODELS / "loras"
+LORA_ROOT = (
+    MODELS / "loras"
+)
 
 
 # ============================================================================
@@ -354,12 +497,15 @@ SCHEDULERS = [
 # ============================================================================
 
 DEFAULT_WIDTH = 1024
+
 DEFAULT_HEIGHT = 1024
 
 DEFAULT_TARGET_MP = 1.4
 
 MAX_WIDTH = 2048
+
 MAX_HEIGHT = 2048
+
 MAX_TARGET_MP = 4.0
 
 DEFAULT_GROUNDING = 768
@@ -401,7 +547,10 @@ _comfy_ready = False
 
 _nodes_ready = False
 
-_workflow_cache: dict[str, dict[str, Any]] = {}
+_workflow_cache: dict[
+    str,
+    dict[str, Any],
+] = {}
 
 
 # ============================================================================
@@ -477,7 +626,10 @@ def _install_filtered_requirements(
 
         package = re.split(
             r"[<>=!~;\[\s]",
-            item.lower().replace("_", "-"),
+            item.lower().replace(
+                "_",
+                "-",
+            ),
             maxsplit=1,
         )[0]
 
@@ -485,7 +637,10 @@ def _install_filtered_requirements(
             requirements.append(item)
 
     if requirements:
-        _pip_install(requirements)
+
+        _pip_install(
+            requirements
+        )
 
 
 def _ensure_repo(
@@ -518,12 +673,17 @@ def _restore_utils_namespace() -> None:
 
     target = COMFY / "utilities"
 
+
     if not source.exists() and target.exists():
 
-        target.rename(source)
+        target.rename(
+            source
+        )
+
 
     if not source.exists():
         return
+
 
     for path in COMFY.rglob("*.py"):
 
@@ -540,6 +700,7 @@ def _restore_utils_namespace() -> None:
 
             continue
 
+
         updated = re.sub(
             r"\bfrom utilities\b",
             "from utils",
@@ -551,6 +712,7 @@ def _restore_utils_namespace() -> None:
             "import utils",
             updated,
         )
+
 
         if updated != text:
 
@@ -581,10 +743,12 @@ def _ensure_model_directories() -> None:
             exist_ok=True,
         )
 
+
     INPUT.mkdir(
         parents=True,
         exist_ok=True,
     )
+
 
     OUTPUT.mkdir(
         parents=True,
@@ -603,6 +767,7 @@ def _download_identity_model() -> None:
         exist_ok=True,
     )
 
+
     if IDENTITY_LORA_PATH.exists():
 
         print(
@@ -613,6 +778,7 @@ def _download_identity_model() -> None:
 
         return
 
+
     token = (
         os.environ.get("HF_TOKEN")
         or os.environ.get(
@@ -620,11 +786,13 @@ def _download_identity_model() -> None:
         )
     )
 
+
     print(
         "[identity] downloading:",
         IDENTITY_FILE,
         flush=True,
     )
+
 
     downloaded = pathlib.Path(
         hf_hub_download(
@@ -637,6 +805,7 @@ def _download_identity_model() -> None:
         )
     )
 
+
     if (
         downloaded.resolve()
         != IDENTITY_LORA_PATH.resolve()
@@ -646,6 +815,7 @@ def _download_identity_model() -> None:
             str(downloaded),
             str(IDENTITY_LORA_PATH),
         )
+
 
     print(
         "[identity] ready:",
@@ -661,9 +831,12 @@ def _download_identity_model() -> None:
 def _scan_local_models() -> None:
 
     global LOCAL_BASE_MODELS
+
     global LOCAL_LORAS
 
+
     _ensure_model_directories()
+
 
     extensions = {
         ".safetensors",
@@ -679,6 +852,7 @@ def _scan_local_models() -> None:
 
     models: list[str] = []
 
+
     if DIFFUSION_DIR.exists():
 
         for path in DIFFUSION_DIR.rglob("*"):
@@ -686,18 +860,26 @@ def _scan_local_models() -> None:
             if not path.is_file():
                 continue
 
-            if path.suffix.lower() not in extensions:
+            if (
+                path.suffix.lower()
+                not in extensions
+            ):
                 continue
 
-            relative = path.relative_to(
-                DIFFUSION_DIR
+
+            relative = (
+                path.relative_to(
+                    DIFFUSION_DIR
+                )
             )
+
 
             models.append(
                 pathlib.PurePosixPath(
                     *relative.parts
                 ).as_posix()
             )
+
 
     LOCAL_BASE_MODELS = sorted(
         models,
@@ -711,6 +893,7 @@ def _scan_local_models() -> None:
 
     loras: list[str] = []
 
+
     if LORA_ROOT.exists():
 
         for path in LORA_ROOT.rglob("*"):
@@ -718,8 +901,12 @@ def _scan_local_models() -> None:
             if not path.is_file():
                 continue
 
-            if path.suffix.lower() not in extensions:
+            if (
+                path.suffix.lower()
+                not in extensions
+            ):
                 continue
+
 
             try:
 
@@ -734,9 +921,13 @@ def _scan_local_models() -> None:
 
                 pass
 
-            relative = path.relative_to(
-                LORA_ROOT
+
+            relative = (
+                path.relative_to(
+                    LORA_ROOT
+                )
             )
+
 
             loras.append(
                 pathlib.PurePosixPath(
@@ -744,15 +935,12 @@ def _scan_local_models() -> None:
                 ).as_posix()
             )
 
+
     LOCAL_LORAS = sorted(
         loras,
         key=str.lower,
     )
 
-
-    # ------------------------------------------------------------------------
-    # LOG
-    # ------------------------------------------------------------------------
 
     print(
         f"[models] found "
@@ -760,6 +948,7 @@ def _scan_local_models() -> None:
         f"local diffusion model(s)",
         flush=True,
     )
+
 
     for model in LOCAL_BASE_MODELS:
 
@@ -776,6 +965,7 @@ def _scan_local_models() -> None:
         f"local LoRA(s)",
         flush=True,
     )
+
 
     for lora in LOCAL_LORAS:
 
@@ -800,6 +990,7 @@ def _validate_required_assets() -> None:
         / TEXT_ENCODER_FILE
     )
 
+
     if not text_encoder.is_file():
 
         missing.append(
@@ -811,6 +1002,7 @@ def _validate_required_assets() -> None:
         VAE_DIR
         / VAE_FILE
     )
+
 
     if not vae.is_file():
 
@@ -846,14 +1038,18 @@ def _ensure_comfy() -> None:
 
     global _comfy_ready
 
+
     if _comfy_ready:
+
+        _gen_log(
+            "ComfyUI setup already marked ready"
+        )
+
         return
 
 
-    print(
-        "[comfy] using:",
-        COMFY,
-        flush=True,
+    _gen_log(
+        f"Using ComfyUI: {COMFY}"
     )
 
 
@@ -871,6 +1067,10 @@ def _ensure_comfy() -> None:
     # Requirements
     # ------------------------------------------------------------------------
 
+    _gen_log(
+        "Checking/installing filtered ComfyUI requirements"
+    )
+
     _install_filtered_requirements(
         COMFY / "requirements.txt"
     )
@@ -880,10 +1080,15 @@ def _ensure_comfy() -> None:
     # Custom nodes
     # ------------------------------------------------------------------------
 
+    _gen_log(
+        "Checking Krea2Edit custom node"
+    )
+
     CUSTOM_NODES.mkdir(
         parents=True,
         exist_ok=True,
     )
+
 
     _ensure_repo(
         CUSTOM_NODES / "comfyui-krea2edit",
@@ -895,6 +1100,10 @@ def _ensure_comfy() -> None:
     # Compatibility
     # ------------------------------------------------------------------------
 
+    _gen_log(
+        "Restoring utils namespace compatibility"
+    )
+
     _restore_utils_namespace()
 
 
@@ -902,12 +1111,20 @@ def _ensure_comfy() -> None:
     # Directories
     # ------------------------------------------------------------------------
 
+    _gen_log(
+        "Ensuring model directories"
+    )
+
     _ensure_model_directories()
 
 
     # ------------------------------------------------------------------------
-    # Identity adapter only
+    # Identity adapter
     # ------------------------------------------------------------------------
+
+    _gen_log(
+        "Checking identity adapter"
+    )
 
     _download_identity_model()
 
@@ -916,10 +1133,19 @@ def _ensure_comfy() -> None:
     # Scan
     # ------------------------------------------------------------------------
 
+    _gen_log(
+        "Scanning local models"
+    )
+
     _scan_local_models()
 
 
     _comfy_ready = True
+
+
+    _gen_log(
+        "ComfyUI setup marked READY"
+    )
 
 
 # ============================================================================
@@ -930,19 +1156,32 @@ def _init_comfy_nodes() -> None:
 
     global _nodes_ready
 
+
     if _nodes_ready:
+
+        _gen_log(
+            "ComfyUI nodes already initialized"
+        )
+
         return
+
+
+    _gen_log(
+        "Starting ComfyUI node initialization"
+    )
 
 
     comfy_path = str(COMFY)
 
 
     # Make sure ComfyUI is first.
+
     sys.path = [
         item
         for item in sys.path
         if item != comfy_path
     ]
+
 
     sys.path.insert(
         0,
@@ -950,7 +1189,16 @@ def _init_comfy_nodes() -> None:
     )
 
 
+    _gen_log(
+        f"Added ComfyUI to sys.path: "
+        f"{comfy_path}"
+    )
+
+
     # Remove stale utils modules.
+
+    removed_utils = 0
+
     for name in list(sys.modules):
 
         if (
@@ -960,30 +1208,94 @@ def _init_comfy_nodes() -> None:
 
             del sys.modules[name]
 
-
-    os.chdir(COMFY)
-
-
-    import execution
-    import nodes
-    import server
-
-    from app.assets.manager import default_asset_manager
-    loop = asyncio.new_event_loop()
-
-    asyncio.set_event_loop(loop)
+            removed_utils += 1
 
 
-    server_instance = server.PromptServer(
-        loop,
-        default_asset_manager()
+    _gen_log(
+        f"Removed {removed_utils} stale utils module(s)"
     )
 
+
+    os.chdir(
+        COMFY
+    )
+
+
+    _gen_log(
+        f"Changed working directory to {COMFY}"
+    )
+
+
+    _gen_log(
+        "Importing execution"
+    )
+
+    import execution
+
+
+    _gen_log(
+        "Importing nodes"
+    )
+
+    import nodes
+
+
+    _gen_log(
+        "Importing server"
+    )
+
+    import server
+
+
+    _gen_log(
+        "Importing default_asset_manager"
+    )
+
+    from app.assets.manager import (
+        default_asset_manager
+    )
+
+
+    _gen_log(
+        "Creating asyncio event loop"
+    )
+
+    loop = asyncio.new_event_loop()
+
+    asyncio.set_event_loop(
+        loop
+    )
+
+
+    _gen_log(
+        "Creating PromptServer"
+    )
+
+    server_instance = (
+        server.PromptServer(
+            loop,
+            default_asset_manager(),
+        )
+    )
+
+
+    _gen_log(
+        "PromptServer created successfully"
+    )
+
+
+    _gen_log(
+        "Creating PromptQueue"
+    )
 
     execution.PromptQueue(
         server_instance
     )
 
+
+    _gen_log(
+        "Initializing extra ComfyUI nodes"
+    )
 
     loop.run_until_complete(
         nodes.init_extra_nodes()
@@ -991,6 +1303,11 @@ def _init_comfy_nodes() -> None:
 
 
     _nodes_ready = True
+
+
+    _gen_log(
+        "ComfyUI nodes initialized successfully"
+    )
 
 
 # ============================================================================
@@ -1007,6 +1324,7 @@ def _validate_model_name(
         "\\",
         "/",
     )
+
 
     path = pathlib.PurePosixPath(
         normalized
@@ -1077,6 +1395,7 @@ def _validate_lora_name(
         "\\",
         "/",
     )
+
 
     path = pathlib.PurePosixPath(
         normalized
@@ -1209,6 +1528,10 @@ def _t2i_workflow(
 
     if cache_key in _workflow_cache:
 
+        _gen_log(
+            f"Using cached T2I workflow: {cache_key}"
+        )
+
         return json.loads(
             json.dumps(
                 _workflow_cache[
@@ -1217,6 +1540,10 @@ def _t2i_workflow(
             )
         )
 
+
+    _gen_log(
+        "Reading T2I source workflow"
+    )
 
     _read_source_workflow(
         T2I_SOURCE
@@ -1321,7 +1648,9 @@ def _t2i_workflow(
 
 
     return json.loads(
-        json.dumps(workflow)
+        json.dumps(
+            workflow
+        )
     )
 
 
@@ -1338,6 +1667,10 @@ def _edit_workflow(
         base_model
     )
 
+
+    _gen_log(
+        "Reading EDIT source workflow"
+    )
 
     _read_source_workflow(
         EDIT_SOURCE
@@ -1485,6 +1818,7 @@ def _edit_workflow(
             },
         }
 
+
         workflow["16"] = {
             "class_type": "VAEEncode",
             "inputs": {
@@ -1493,13 +1827,16 @@ def _edit_workflow(
             },
         }
 
+
         workflow["9"]["inputs"][
             "source_latent_b"
         ] = _ref("16")
 
+
         workflow["9"]["inputs"][
             "source_image_b"
         ] = _ref("2")
+
 
         workflow["10"]["inputs"][
             "image_b"
@@ -1520,9 +1857,13 @@ def _find_node(
 
     for node_id, node in workflow.items():
 
-        if node.get("class_type") == class_type:
+        if (
+            node.get("class_type")
+            == class_type
+        ):
 
             return node_id
+
 
     raise KeyError(
         f"workflow does not contain "
@@ -1536,12 +1877,18 @@ def _find_node(
 
 def _inject_lora_chain(
     workflow: dict[str, Any],
-    enabled_loras: list[tuple[str, float]],
+    enabled_loras: list[
+        tuple[str, float]
+    ],
     *,
     model_source: list[Any],
     clip_source: list[Any],
-    model_consumers: list[tuple[str, str]],
-    clip_consumers: list[tuple[str, str]],
+    model_consumers: list[
+        tuple[str, str]
+    ],
+    clip_consumers: list[
+        tuple[str, str]
+    ],
 ) -> None:
 
     if not enabled_loras:
@@ -1592,6 +1939,7 @@ def _inject_lora_chain(
             node_id
         )
 
+
         previous_clip = _ref(
             node_id,
             1,
@@ -1625,9 +1973,15 @@ def _prepare_edit_image(
     target_megapixels: float,
 ) -> tuple[str, int, int]:
 
+    _gen_log(
+        f"Opening edit image: {path}"
+    )
+
     with Image.open(path) as source:
 
-        image = source.convert("RGB")
+        image = source.convert(
+            "RGB"
+        )
 
 
         megapixels = max(
@@ -1681,6 +2035,7 @@ def _prepare_edit_image(
             width,
         )
 
+
         height = min(
             MAX_HEIGHT,
             height,
@@ -1700,10 +2055,22 @@ def _prepare_edit_image(
         )
 
 
+        destination = (
+            INPUT / name
+        )
+
+
         image.save(
-            INPUT / name,
+            destination,
             format="PNG",
         )
+
+
+    _gen_log(
+        f"Prepared edit image: "
+        f"{destination} "
+        f"({width}x{height})"
+    )
 
 
     return (
@@ -1722,9 +2089,15 @@ def _stage_image(
     prefix: str,
 ) -> str:
 
+    _gen_log(
+        f"Staging image: {path}"
+    )
+
     with Image.open(path) as source:
 
-        image = source.convert("RGB")
+        image = source.convert(
+            "RGB"
+        )
 
 
         name = (
@@ -1734,10 +2107,20 @@ def _stage_image(
         )
 
 
+        destination = (
+            INPUT / name
+        )
+
+
         image.save(
-            INPUT / name,
+            destination,
             format="PNG",
         )
+
+
+    _gen_log(
+        f"Staged image: {destination}"
+    )
 
 
     return name
@@ -1932,26 +2315,113 @@ def _inject_edit(
 
 
 # ============================================================================
-# EXECUTE
+# EXECUTE WORKFLOW
 # ============================================================================
 
 def _execute_workflow(
     workflow: dict[str, Any],
 ) -> list[str]:
 
-    import execution
-    import server
-    from app.assets.manager import default_asset_manager
-    loop = asyncio.new_event_loop()
-
-    asyncio.set_event_loop(loop)
+    execution_start = time.time()
 
 
-    server_instance = server.PromptServer(
-        loop,
-        default_asset_manager()
+    _gen_log(
+        "-" * 80
     )
 
+    _gen_log(
+        "ENTERING _execute_workflow()"
+    )
+
+
+    _gen_log(
+        f"Workflow contains "
+        f"{len(workflow)} node(s)"
+    )
+
+
+    # ------------------------------------------------------------------------
+    # PRINT EVERY WORKFLOW NODE
+    # ------------------------------------------------------------------------
+
+    for node_id, node in workflow.items():
+
+        _gen_log(
+            f"NODE {node_id}: "
+            f"{node.get('class_type', 'UNKNOWN')}"
+        )
+
+
+    # ------------------------------------------------------------------------
+    # IMPORTS
+    # ------------------------------------------------------------------------
+
+    _gen_log(
+        "Importing execution module..."
+    )
+
+    import execution
+
+
+    _gen_log(
+        "Importing server module..."
+    )
+
+    import server
+
+
+    _gen_log(
+        "Importing default_asset_manager..."
+    )
+
+    from app.assets.manager import (
+        default_asset_manager
+    )
+
+
+    # ------------------------------------------------------------------------
+    # EVENT LOOP
+    # ------------------------------------------------------------------------
+
+    _gen_log(
+        "Creating asyncio event loop..."
+    )
+
+    loop = asyncio.new_event_loop()
+
+    asyncio.set_event_loop(
+        loop
+    )
+
+
+    # ------------------------------------------------------------------------
+    # PROMPT SERVER
+    # ------------------------------------------------------------------------
+
+    _gen_log(
+        "Creating PromptServer..."
+    )
+
+    server_instance = (
+        server.PromptServer(
+            loop,
+            default_asset_manager(),
+        )
+    )
+
+
+    _gen_log(
+        "PromptServer created successfully"
+    )
+
+
+    # ------------------------------------------------------------------------
+    # EXECUTOR
+    # ------------------------------------------------------------------------
+
+    _gen_log(
+        "Creating PromptExecutor..."
+    )
 
     executor = execution.PromptExecutor(
         server_instance,
@@ -1964,13 +2434,71 @@ def _execute_workflow(
     )
 
 
-    prompt_id = str(uuid.uuid4())
+    _gen_log(
+        "PromptExecutor created successfully"
+    )
+
+
+    # ------------------------------------------------------------------------
+    # PROMPT ID
+    # ------------------------------------------------------------------------
+
+    prompt_id = str(
+        uuid.uuid4()
+    )
+
+
+    _gen_log(
+        f"Prompt ID: {prompt_id}"
+    )
+
+
+    # ------------------------------------------------------------------------
+    # FIND SAVE IMAGE NODE
+    # ------------------------------------------------------------------------
+
+    _gen_log(
+        "Finding SaveImage node..."
+    )
 
 
     save_id = _find_node(
         workflow,
         "SaveImage",
     )
+
+
+    _gen_log(
+        f"SaveImage node ID: {save_id}"
+    )
+
+
+    # ------------------------------------------------------------------------
+    # EXECUTE
+    # ------------------------------------------------------------------------
+
+    _gen_log(
+        "=" * 80
+    )
+
+    _gen_log(
+        "CALLING executor.execute()"
+    )
+
+    _gen_log(
+        "COMFYUI WORKFLOW EXECUTION STARTING"
+    )
+
+    _gen_log(
+        "The next section is the actual model execution."
+    )
+
+    _gen_log(
+        "=" * 80
+    )
+
+
+    execute_start = time.time()
 
 
     executor.execute(
@@ -1983,6 +2511,34 @@ def _execute_workflow(
     )
 
 
+    execute_elapsed = (
+        time.time()
+        - execute_start
+    )
+
+
+    _gen_log(
+        f"executor.execute() RETURNED "
+        f"after {execute_elapsed:.3f}s"
+    )
+
+
+    _gen_log(
+        f"executor.success = "
+        f"{executor.success}"
+    )
+
+
+    _gen_log(
+        f"executor.status_messages = "
+        f"{executor.status_messages}"
+    )
+
+
+    # ------------------------------------------------------------------------
+    # FAILURE
+    # ------------------------------------------------------------------------
+
     if not executor.success:
 
         message = (
@@ -1991,21 +2547,83 @@ def _execute_workflow(
             else "ComfyUI execution failed"
         )
 
+
+        _gen_log(
+            f"COMFYUI EXECUTION FAILED: "
+            f"{message}"
+        )
+
+
         raise RuntimeError(
             str(message)
         )
 
 
+    _gen_log(
+        "ComfyUI execution reported SUCCESS"
+    )
+
+
+    # ------------------------------------------------------------------------
+    # HISTORY
+    # ------------------------------------------------------------------------
+
+    _gen_log(
+        "Reading executor.history_result..."
+    )
+
+
+    history = (
+        executor.history_result
+    )
+
+
+    _gen_log(
+        f"history_result keys: "
+        f"{list(history.keys())}"
+    )
+
+
     paths: list[pathlib.Path] = []
 
 
-    for output in (
-        executor.history_result
+    # ------------------------------------------------------------------------
+    # FIND OUTPUTS
+    # ------------------------------------------------------------------------
+
+    for (
+        output_node_id,
+        output,
+    ) in (
+        history
         .get("outputs", {})
-        .values()
+        .items()
     ):
 
-        for items in output.values():
+        _gen_log(
+            f"Processing output node: "
+            f"{output_node_id}"
+        )
+
+
+        if not isinstance(
+            output,
+            dict,
+        ):
+
+            continue
+
+
+        for (
+            output_type,
+            items,
+        ) in output.items():
+
+            _gen_log(
+                f"Output type: "
+                f"{output_type}"
+            )
+
 
             if not isinstance(
                 items,
@@ -2016,6 +2634,12 @@ def _execute_workflow(
 
 
             for item in items:
+
+                _gen_log(
+                    f"Output item: "
+                    f"{item}"
+                )
+
 
                 if (
                     not isinstance(
@@ -2055,14 +2679,47 @@ def _execute_workflow(
                 )
 
 
+                _gen_log(
+                    f"Checking output file: "
+                    f"{candidate}"
+                )
+
+
                 if candidate.exists():
+
+                    _gen_log(
+                        f"FOUND OUTPUT: "
+                        f"{candidate}"
+                    )
+
 
                     paths.append(
                         candidate
                     )
 
+                else:
+
+                    _gen_log(
+                        f"Output file does not exist: "
+                        f"{candidate}"
+                    )
+
+
+    # ------------------------------------------------------------------------
+    # FALLBACK SEARCH
+    # ------------------------------------------------------------------------
 
     if not paths:
+
+        _gen_log(
+            "No outputs found from executor history."
+        )
+
+
+        _gen_log(
+            f"Searching {OUTPUT} recursively..."
+        )
+
 
         paths = sorted(
             [
@@ -2081,12 +2738,56 @@ def _execute_workflow(
         )
 
 
+        _gen_log(
+            f"Fallback search found "
+            f"{len(paths)} PNG file(s)"
+        )
+
+
+    # ------------------------------------------------------------------------
+    # NO OUTPUT
+    # ------------------------------------------------------------------------
+
     if not paths:
+
+        _gen_log(
+            "NO OUTPUT IMAGE FOUND"
+        )
+
 
         raise RuntimeError(
             "ComfyUI finished without "
             "an output image"
         )
+
+
+    # ------------------------------------------------------------------------
+    # RESULTS
+    # ------------------------------------------------------------------------
+
+    for path in paths:
+
+        _gen_log(
+            f"FINAL RESULT FILE: "
+            f"{path}"
+        )
+
+
+    total_execution_time = (
+        time.time()
+        - execution_start
+    )
+
+
+    _gen_log(
+        f"_execute_workflow() finished "
+        f"in {total_execution_time:.3f}s"
+    )
+
+
+    _gen_log(
+        "-" * 80
+    )
 
 
     return [
@@ -2104,11 +2805,35 @@ def _prepare_runtime(
     progress: gr.Progress | None = None,
 ) -> str:
 
+    _gen_log(
+        "ENTERING _prepare_runtime()"
+    )
+
+
+    _gen_log(
+        "Calling _ensure_comfy()"
+    )
+
     _ensure_comfy()
+
+
+    _gen_log(
+        "Calling _scan_local_models()"
+    )
 
     _scan_local_models()
 
+
+    _gen_log(
+        "Validating required assets"
+    )
+
     _validate_required_assets()
+
+
+    _gen_log(
+        "Required assets validated"
+    )
 
 
     if not LOCAL_BASE_MODELS:
@@ -2121,6 +2846,18 @@ def _prepare_runtime(
         )
 
 
+    _gen_log(
+        f"Available diffusion models: "
+        f"{LOCAL_BASE_MODELS}"
+    )
+
+
+    _gen_log(
+        f"Validating selected model: "
+        f"{base_model}"
+    )
+
+
     resolved_base_model = (
         _validate_model_name(
             base_model
@@ -2128,7 +2865,23 @@ def _prepare_runtime(
     )
 
 
+    _gen_log(
+        f"Resolved model: "
+        f"{resolved_base_model}"
+    )
+
+
+    _gen_log(
+        "Calling _init_comfy_nodes()"
+    )
+
+
     _init_comfy_nodes()
+
+
+    _gen_log(
+        "_prepare_runtime() COMPLETE"
+    )
 
 
     return resolved_base_model
@@ -2273,24 +3026,148 @@ def generate(
     int,
 ]:
 
-    effective_seed = (
-        random.randint(
-            0,
-            2**32 - 1,
-        )
-        if (
-            randomize_seed
-            or int(seed) < 0
-        )
-        else int(seed)
+    # ------------------------------------------------------------------------
+    # TOTAL TIMER
+    # ------------------------------------------------------------------------
+
+    total_start = time.time()
+
+
+    _gen_log("=" * 80)
+
+    _gen_log(
+        "GENERATE BUTTON CLICKED"
+    )
+
+    _gen_log("=" * 80)
+
+
+    # ------------------------------------------------------------------------
+    # INPUT LOGGING
+    # ------------------------------------------------------------------------
+
+    _gen_log(
+        f"mode={mode}"
+    )
+
+    _gen_log(
+        f"base_model={base_model}"
+    )
+
+    _gen_log(
+        f"prompt={prompt!r}"
+    )
+
+    _gen_log(
+        f"edit_prompt={edit_prompt!r}"
+    )
+
+    _gen_log(
+        f"primary_image={primary_image}"
+    )
+
+    _gen_log(
+        f"second_image={second_image}"
+    )
+
+    _gen_log(
+        f"width={width}"
+    )
+
+    _gen_log(
+        f"height={height}"
+    )
+
+    _gen_log(
+        f"target_megapixels={target_megapixels}"
+    )
+
+    _gen_log(
+        f"grounding_px={grounding_px}"
+    )
+
+    _gen_log(
+        f"ref_boost={ref_boost}"
+    )
+
+    _gen_log(
+        f"ref_boost_a={ref_boost_a}"
+    )
+
+    _gen_log(
+        f"steps={steps}"
+    )
+
+    _gen_log(
+        f"cfg={cfg}"
+    )
+
+    _gen_log(
+        f"sampler={sampler}"
+    )
+
+    _gen_log(
+        f"scheduler={scheduler}"
+    )
+
+    _gen_log(
+        f"seed={seed}"
+    )
+
+    _gen_log(
+        f"randomize_seed={randomize_seed}"
+    )
+
+    _gen_log(
+        f"gen_budget={gen_budget}"
+    )
+
+    _gen_log(
+        f"lora_weights={lora_weights}"
     )
 
 
     staged: list[pathlib.Path] = []
 
-    total_start = time.time()
 
     try:
+
+        # --------------------------------------------------------------------
+        # SEED
+        # --------------------------------------------------------------------
+
+        step_start = _gen_log_step(
+            "Calculating effective seed"
+        )
+
+
+        effective_seed = (
+            random.randint(
+                0,
+                2**32 - 1,
+            )
+            if (
+                randomize_seed
+                or int(seed) < 0
+            )
+            else int(seed)
+        )
+
+
+        _gen_log(
+            f"effective_seed={effective_seed} "
+            f"({time.time() - step_start:.3f}s)"
+        )
+
+
+        # --------------------------------------------------------------------
+        # VALIDATION
+        # --------------------------------------------------------------------
+
+        step_start = _gen_log_step(
+            "Validating request"
+        )
+
 
         _validate_request(
             mode,
@@ -2300,11 +3177,26 @@ def generate(
         )
 
 
+        _gen_log(
+            f"Request validation complete "
+            f"({time.time() - step_start:.3f}s)"
+        )
+
+
         effective_edit_prompt = (
             edit_prompt
             or prompt
             or ""
         ).strip()
+
+
+        # --------------------------------------------------------------------
+        # SAMPLER
+        # --------------------------------------------------------------------
+
+        step_start = _gen_log_step(
+            "Validating sampler and scheduler"
+        )
 
 
         if sampler not in SAMPLERS:
@@ -2321,11 +3213,41 @@ def generate(
             )
 
 
+        _gen_log(
+            f"Sampler/scheduler validation complete "
+            f"({time.time() - step_start:.3f}s)"
+        )
+
+
+        # --------------------------------------------------------------------
+        # RUNTIME
+        # --------------------------------------------------------------------
+
+        step_start = _gen_log_step(
+            "Preparing ComfyUI runtime"
+        )
+
+
         resolved_base_model = (
             _prepare_runtime(
                 base_model,
                 progress,
             )
+        )
+
+
+        _gen_log(
+            f"Runtime ready "
+            f"({time.time() - step_start:.3f}s)"
+        )
+
+
+        # --------------------------------------------------------------------
+        # LORAS
+        # --------------------------------------------------------------------
+
+        step_start = _gen_log_step(
+            "Validating and preparing LoRAs"
         )
 
 
@@ -2337,6 +3259,13 @@ def generate(
         for filename, weight in (
             lora_weights or {}
         ).items():
+
+            _gen_log(
+                f"Checking LoRA: "
+                f"{filename} "
+                f"weight={weight}"
+            )
+
 
             if filename not in LOCAL_LORAS:
 
@@ -2381,11 +3310,30 @@ def generate(
                 )
 
 
+                _gen_log(
+                    f"LoRA ENABLED: "
+                    f"{validated_name} "
+                    f"weight={numeric_weight}"
+                )
+
+
+        _gen_log(
+            f"LoRA preparation complete. "
+            f"Enabled={len(enabled_loras)} "
+            f"({time.time() - step_start:.3f}s)"
+        )
+
+
         # --------------------------------------------------------------------
         # T2I
         # --------------------------------------------------------------------
 
         if mode == "text2image":
+
+            _gen_log(
+                "Preparing TEXT-TO-IMAGE workflow"
+            )
+
 
             width = max(
                 512,
@@ -2409,8 +3357,23 @@ def generate(
             )
 
 
+            _gen_log(
+                f"Final T2I resolution: "
+                f"{width}x{height}"
+            )
+
+
+            step_start = time.time()
+
+
             workflow = _t2i_workflow(
                 resolved_base_model
+            )
+
+
+            _gen_log(
+                f"T2I workflow created "
+                f"({time.time() - step_start:.3f}s)"
             )
 
 
@@ -2419,6 +3382,14 @@ def generate(
         # --------------------------------------------------------------------
 
         else:
+
+            _gen_log(
+                "Preparing EDIT workflow"
+            )
+
+
+            step_start = time.time()
+
 
             (
                 primary_name,
@@ -2430,26 +3401,53 @@ def generate(
             )
 
 
+            _gen_log(
+                f"Primary image prepared: "
+                f"{primary_name}, "
+                f"{width}x{height} "
+                f"({time.time() - step_start:.3f}s)"
+            )
+
+
             staged.append(
                 INPUT / primary_name
             )
 
 
-            second_name = (
-                _stage_image(
+            if second_image:
+
+                step_start = time.time()
+
+
+                second_name = _stage_image(
                     second_image,
                     "reference",
                 )
-                if second_image
-                else None
-            )
 
-
-            if second_name:
 
                 staged.append(
                     INPUT / second_name
                 )
+
+
+                _gen_log(
+                    f"Second image staged: "
+                    f"{second_name} "
+                    f"({time.time() - step_start:.3f}s)"
+                )
+
+
+            else:
+
+                second_name = None
+
+
+                _gen_log(
+                    "No second reference image"
+                )
+
+
+            step_start = time.time()
 
 
             workflow = _edit_workflow(
@@ -2458,11 +3456,22 @@ def generate(
             )
 
 
+            _gen_log(
+                f"Edit workflow created "
+                f"({time.time() - step_start:.3f}s)"
+            )
+
+
         # --------------------------------------------------------------------
-        # INJECT
+        # INJECTION
         # --------------------------------------------------------------------
 
         if mode == "text2image":
+
+            step_start = _gen_log_step(
+                "Injecting T2I parameters"
+            )
+
 
             _inject_t2i(
                 workflow,
@@ -2477,7 +3486,19 @@ def generate(
                 enabled_loras=enabled_loras,
             )
 
+
+            _gen_log(
+                f"T2I injection complete "
+                f"({time.time() - step_start:.3f}s)"
+            )
+
+
         else:
+
+            step_start = _gen_log_step(
+                "Injecting EDIT parameters"
+            )
+
 
             _inject_edit(
                 workflow,
@@ -2504,9 +3525,20 @@ def generate(
             )
 
 
+            _gen_log(
+                f"EDIT injection complete "
+                f"({time.time() - step_start:.3f}s)"
+            )
+
+
         # --------------------------------------------------------------------
         # METADATA
         # --------------------------------------------------------------------
+
+        step_start = _gen_log_step(
+            "Building metadata"
+        )
+
 
         active_loras = [
             {
@@ -2554,11 +3586,33 @@ def generate(
             custom_loras=[],
         )
 
-        t0 = time.time()
+
+        _gen_log(
+            f"Metadata ready "
+            f"({time.time() - step_start:.3f}s)"
+        )
+
+
+        # --------------------------------------------------------------------
+        # START COMFYUI
+        # --------------------------------------------------------------------
+
         progress(
             0.35,
             desc=f"generating {mode}",
         )
+
+
+        _gen_log("=" * 80)
+
+        _gen_log(
+            "STARTING COMFYUI WORKFLOW EXECUTION"
+        )
+
+        _gen_log("=" * 80)
+
+
+        comfy_start = time.time()
 
 
         result_paths = _execute_workflow(
@@ -2566,10 +3620,65 @@ def generate(
         )
 
 
+        comfy_elapsed = (
+            time.time()
+            - comfy_start
+        )
+
+
+        _gen_log(
+            f"COMFYUI GENERATION FINISHED "
+            f"in {comfy_elapsed:.3f}s"
+        )
+
+
+        _gen_log(
+            f"ComfyUI returned "
+            f"{len(result_paths)} result path(s)"
+        )
+
+
+        for path in result_paths:
+
+            _gen_log(
+                f"Generated file: {path}"
+            )
+
+
+        # --------------------------------------------------------------------
+        # OUTPUT DIRECTORY
+        # --------------------------------------------------------------------
+
+        step_start = _gen_log_step(
+            "Creating temporary output directory"
+        )
+
+
         destination_dir = pathlib.Path(
             tempfile.mkdtemp(
                 prefix="krea2_outputs_"
             )
+        )
+
+
+        _gen_log(
+            f"Output directory: "
+            f"{destination_dir}"
+        )
+
+
+        _gen_log(
+            f"Output directory ready "
+            f"({time.time() - step_start:.3f}s)"
+        )
+
+
+        # --------------------------------------------------------------------
+        # METADATA OUTPUT
+        # --------------------------------------------------------------------
+
+        step_start = _gen_log_step(
+            "Writing metadata-preserving output images"
         )
 
 
@@ -2586,6 +3695,14 @@ def generate(
             )
 
 
+            _gen_log(
+                f"Writing output "
+                f"{index + 1}/"
+                f"{len(result_paths)}: "
+                f"{source} -> {destination}"
+            )
+
+
             write_png_metadata(
                 source,
                 destination,
@@ -2597,19 +3714,124 @@ def generate(
                 str(destination)
             )
 
-        # Upload the final metadata-preserving images to MEGA.
-        mega_results: list[str] = []
-        for output_path in output_paths:
-            mega_results.append(_upload_to_mega(output_path, account=MEGA_ACCOUNT))
 
-        print(f"[mega] uploaded {len(mega_results)} image(s)", flush=True)
-        print(f"⏱️ Total: "f"{time.time() - total_start:.1f}s")
+            _gen_log(
+                f"Output {index + 1} complete"
+            )
+
+
+        _gen_log(
+            f"Metadata/output processing complete "
+            f"({time.time() - step_start:.3f}s)"
+        )
+
+
+        # --------------------------------------------------------------------
+        # MEGA
+        # --------------------------------------------------------------------
+
+        _gen_log("=" * 80)
+
+        _gen_log(
+            "STARTING MEGA UPLOAD"
+        )
+
+        _gen_log("=" * 80)
+
+
+        mega_start = time.time()
+
+
+        mega_results: list[str] = []
+
+
+        for index, output_path in enumerate(
+            output_paths
+        ):
+
+            _gen_log(
+                f"Uploading image "
+                f"{index + 1}/"
+                f"{len(output_paths)}: "
+                f"{output_path}"
+            )
+
+
+            upload_start = time.time()
+
+
+            result = _upload_to_mega(
+                output_path,
+                account=MEGA_ACCOUNT,
+            )
+
+
+            mega_results.append(
+                result
+            )
+
+
+            _gen_log(
+                f"Upload {index + 1} finished "
+                f"in "
+                f"{time.time() - upload_start:.3f}s"
+            )
+
+
+        _gen_log(
+            f"ALL MEGA UPLOADS COMPLETE "
+            f"in "
+            f"{time.time() - mega_start:.3f}s"
+        )
+
+
+        _gen_log(
+            f"[mega] uploaded "
+            f"{len(mega_results)} image(s)"
+        )
+
+
+        # --------------------------------------------------------------------
+        # COMPLETE
+        # --------------------------------------------------------------------
+
+        total_elapsed = (
+            time.time()
+            - total_start
+        )
+
+
+        _gen_log("=" * 80)
+
+        _gen_log(
+            f"GENERATION COMPLETE"
+        )
+
+        _gen_log(
+            f"TOTAL TIME: "
+            f"{total_elapsed:.3f}s"
+        )
+
+        _gen_log(
+            f"OUTPUT COUNT: "
+            f"{len(output_paths)}"
+        )
+
+        _gen_log(
+            f"FINAL SEED: "
+            f"{effective_seed}"
+        )
+
+        _gen_log("=" * 80)
+
+
         return (
             output_paths,
             (
                 f"done — "
                 f"{len(output_paths)} image(s), "
-                f"uploaded to MEGA folder '{os.environ.get('MEGA_FOLDER', 'Krea2-Outputs')}' — "
+                f"uploaded to MEGA folder "
+                f"'{os.environ.get('MEGA_FOLDER', 'Krea2-Outputs')}' — "
                 f"seed {effective_seed}"
             ),
             effective_seed,
@@ -2617,6 +3839,36 @@ def generate(
 
 
     except Exception as exc:
+
+        total_elapsed = (
+            time.time()
+            - total_start
+        )
+
+
+        _gen_log("=" * 80)
+
+        _gen_log(
+            "GENERATION FAILED"
+        )
+
+        _gen_log(
+            f"FAILED AFTER: "
+            f"{total_elapsed:.3f}s"
+        )
+
+        _gen_log(
+            f"ERROR TYPE: "
+            f"{type(exc).__name__}"
+        )
+
+        _gen_log(
+            f"ERROR: "
+            f"{exc}"
+        )
+
+        _gen_log("=" * 80)
+
 
         print(
             traceback.format_exc(),
@@ -2632,6 +3884,12 @@ def generate(
 
     finally:
 
+        _gen_log(
+            f"Cleaning up "
+            f"{len(staged)} staged file(s)"
+        )
+
+
         for path in staged:
 
             try:
@@ -2640,9 +3898,26 @@ def generate(
                     missing_ok=True
                 )
 
-            except OSError:
 
-                pass
+                _gen_log(
+                    f"Removed staged file: "
+                    f"{path}"
+                )
+
+
+            except OSError as exc:
+
+                _gen_log(
+                    f"Could not remove staged file "
+                    f"{path}: {exc}"
+                )
+
+
+        _gen_log(
+            f"Generate handler finished. "
+            f"Total elapsed: "
+            f"{time.time() - total_start:.3f}s"
+        )
 
 
 # ============================================================================
@@ -2765,6 +4040,7 @@ def create_ui() -> gr.Blocks:
                         label="primary image / scene",
                     )
 
+
                     second = gr.Image(
                         type="filepath",
                         label="optional second reference",
@@ -2804,6 +4080,7 @@ def create_ui() -> gr.Blocks:
                             label="width",
                         )
 
+
                         height = gr.Slider(
                             512,
                             MAX_HEIGHT,
@@ -2825,6 +4102,7 @@ def create_ui() -> gr.Blocks:
                         label="target megapixels",
                     )
 
+
                     grounding = gr.Slider(
                         384,
                         1536,
@@ -2833,6 +4111,7 @@ def create_ui() -> gr.Blocks:
                         label="grounding resolution",
                     )
 
+
                     ref_boost = gr.Slider(
                         0.0,
                         12.0,
@@ -2840,6 +4119,7 @@ def create_ui() -> gr.Blocks:
                         step=0.1,
                         label="primary reference strength",
                     )
+
 
                     ref_boost_a = gr.Slider(
                         0.0,
@@ -2926,6 +4206,7 @@ def create_ui() -> gr.Blocks:
                             label="sampler",
                         )
 
+
                         scheduler = gr.Dropdown(
                             SCHEDULERS,
                             value=DEFAULT_SCHEDULER,
@@ -2940,6 +4221,7 @@ def create_ui() -> gr.Blocks:
                         precision=0,
                         label="seed",
                     )
+
 
                     randomize = gr.Checkbox(
                         value=False,
@@ -2973,10 +4255,12 @@ def create_ui() -> gr.Blocks:
                     height=600,
                 )
 
+
                 status = gr.Textbox(
                     label="status",
                     interactive=False,
                 )
+
 
                 used_seed = gr.Number(
                     label="used seed",
@@ -2995,6 +4279,7 @@ def create_ui() -> gr.Blocks:
             editing = (
                 value == "edit"
             )
+
 
             return (
                 gr.update(
@@ -3032,6 +4317,7 @@ def create_ui() -> gr.Blocks:
             lora_slider_map.keys()
         )
 
+
         all_lora_sliders = list(
             lora_slider_map.values()
         )
@@ -3065,6 +4351,11 @@ def create_ui() -> gr.Blocks:
             *values,
         ):
 
+            _gen_log(
+                "Gradio generation wrapper called"
+            )
+
+
             base_values = values[:18]
 
             base_model_value = values[18]
@@ -3072,10 +4363,22 @@ def create_ui() -> gr.Blocks:
             lora_values = values[19:]
 
 
+            _gen_log(
+                f"Wrapper base_model="
+                f"{base_model_value}"
+            )
+
+
             lora_weights = (
                 _catalog_weights(
                     list(lora_values)
                 )
+            )
+
+
+            _gen_log(
+                f"Wrapper LoRA weights="
+                f"{lora_weights}"
             )
 
 
@@ -3089,27 +4392,37 @@ def create_ui() -> gr.Blocks:
         generation_inputs = [
 
             mode,
+
             prompt,
+
             edit_prompt,
+
             primary,
+
             second,
 
             width,
+
             height,
 
             target_mp,
 
             grounding,
+
             ref_boost,
+
             ref_boost_a,
 
             steps,
+
             cfg,
 
             sampler,
+
             scheduler,
 
             seed,
+
             randomize,
 
             gen_budget,
@@ -3157,10 +4470,12 @@ def _on_startup() -> None:
             flush=True,
         )
 
+
         print(
             "Krea 2 Turbo Starting",
             flush=True,
         )
+
 
         print(
             "=" * 70,
@@ -3174,11 +4489,13 @@ def _on_startup() -> None:
             flush=True,
         )
 
+
         print(
             "[startup] COMFY:",
             COMFY,
             flush=True,
         )
+
 
         print(
             "[startup] MODELS:",
@@ -3222,6 +4539,7 @@ def _on_startup() -> None:
             f"({type(exc).__name__}: {exc})",
             flush=True,
         )
+
 
         print(
             "[startup] generation will retry setup",
