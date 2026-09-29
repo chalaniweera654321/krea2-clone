@@ -353,8 +353,8 @@ SCHEDULERS = [
 # DEFAULTS
 # ============================================================================
 
-DEFAULT_WIDTH = 1024
-DEFAULT_HEIGHT = 1024
+DEFAULT_WIDTH = 720
+DEFAULT_HEIGHT = 1280
 
 DEFAULT_TARGET_MP = 1.4
 
