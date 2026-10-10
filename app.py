@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import io
 import json
 import os
 import pathlib
@@ -1990,12 +1991,31 @@ def _execute_workflow(
             original_update_absolute = progress_bar_cls.update_absolute
 
             def _save_preview(preview):
-                if not preview_dir or not isinstance(preview, (tuple, list)) or len(preview) < 2:
+                """Save ComfyUI's preview tuple, whose payload is usually encoded bytes."""
+                if not preview_dir or preview is None:
                     return
-                image = preview[1]
-                if not isinstance(image, Image.Image):
-                    return
+
+                image = None
                 try:
+                    # Current ComfyUI commonly passes (format, encoded_image_bytes)
+                    # to ProgressBar.update_absolute. Older/custom versions may pass
+                    # a PIL image, so support both forms.
+                    if isinstance(preview, (tuple, list)) and len(preview) >= 2:
+                        payload = preview[1]
+                        if isinstance(payload, Image.Image):
+                            image = payload.copy()
+                        elif isinstance(payload, (bytes, bytearray, memoryview)):
+                            image = Image.open(io.BytesIO(bytes(payload))).convert("RGB")
+                    elif isinstance(preview, Image.Image):
+                        image = preview.copy()
+                    elif isinstance(preview, (bytes, bytearray, memoryview)):
+                        image = Image.open(io.BytesIO(bytes(preview))).convert("RGB")
+
+                    if image is None:
+                        # Avoid spamming the log for normal progress updates that
+                        # don't include a preview frame.
+                        return
+
                     preview_counter["value"] += 1
                     frame = preview_dir / f"preview_{preview_counter['value']:04d}.jpg"
                     temporary = preview_dir / f".preview_{preview_counter['value']:04d}.tmp.jpg"
@@ -2004,6 +2024,7 @@ def _execute_workflow(
                     pointer_tmp = preview_dir / ".latest_preview.tmp"
                     pointer_tmp.write_text(str(frame), encoding="utf-8")
                     os.replace(pointer_tmp, preview_path)
+                    print(f"[preview] saved frame {preview_counter['value']}", flush=True)
                 except Exception as preview_exc:
                     print(f"[preview] unable to write frame: {preview_exc}", flush=True)
 
