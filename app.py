@@ -1937,6 +1937,7 @@ def _inject_edit(
 
 def _execute_workflow(
     workflow: dict[str, Any],
+    preview_path: str | None = None,
 ) -> list[str]:
 
     import execution
@@ -1973,14 +1974,66 @@ def _execute_workflow(
     )
 
 
-    executor.execute(
-        workflow,
-        prompt_id,
-        extra_data={},
-        execute_outputs=[
-            save_id
-        ],
-    )
+    # Capture ComfyUI's real intermediate latent previews for the Gradio UI.
+    # ComfyUI's latent_preview callback passes a preview tuple to ProgressBar;
+    # intercept that preview while this workflow is executing and write each
+    # frame to a unique file so the browser does not reuse a cached URL.
+    progress_bar_cls = None
+    original_update_absolute = None
+    preview_counter = {"value": 0}
+    preview_dir = pathlib.Path(preview_path).parent if preview_path else None
+
+    if preview_path:
+        try:
+            import comfy.utils
+            progress_bar_cls = comfy.utils.ProgressBar
+            original_update_absolute = progress_bar_cls.update_absolute
+
+            def _save_preview(preview):
+                if not preview_dir or not isinstance(preview, (tuple, list)) or len(preview) < 2:
+                    return
+                image = preview[1]
+                if not isinstance(image, Image.Image):
+                    return
+                try:
+                    preview_counter["value"] += 1
+                    frame = preview_dir / f"preview_{preview_counter['value']:04d}.jpg"
+                    temporary = preview_dir / f".preview_{preview_counter['value']:04d}.tmp.jpg"
+                    image.convert("RGB").save(temporary, format="JPEG", quality=82, optimize=True)
+                    os.replace(temporary, frame)
+                    pointer_tmp = preview_dir / ".latest_preview.tmp"
+                    pointer_tmp.write_text(str(frame), encoding="utf-8")
+                    os.replace(pointer_tmp, preview_path)
+                except Exception as preview_exc:
+                    print(f"[preview] unable to write frame: {preview_exc}", flush=True)
+
+            def _update_absolute_with_preview(self, *args, **kwargs):
+                result = original_update_absolute(self, *args, **kwargs)
+                preview = kwargs.get("preview")
+                if preview is None and len(args) >= 3:
+                    preview = args[2]
+                _save_preview(preview)
+                return result
+
+            progress_bar_cls.update_absolute = _update_absolute_with_preview
+            print("[preview] live latent preview capture enabled", flush=True)
+        except Exception as preview_exc:
+            progress_bar_cls = None
+            original_update_absolute = None
+            print(f"[preview] capture unavailable: {preview_exc}", flush=True)
+
+    try:
+        executor.execute(
+            workflow,
+            prompt_id,
+            extra_data={},
+            execute_outputs=[
+                save_id
+            ],
+        )
+    finally:
+        if progress_bar_cls is not None and original_update_absolute is not None:
+            progress_bar_cls.update_absolute = original_update_absolute
 
 
     if not executor.success:
@@ -2264,6 +2317,7 @@ def generate(
         str,
         float
     ] | None = None,
+    live_preview_path: str | None = None,
     progress: gr.Progress = gr.Progress(
         track_tqdm=True
     ),
@@ -2562,7 +2616,8 @@ def generate(
 
 
         result_paths = _execute_workflow(
-            workflow
+            workflow,
+            preview_path=live_preview_path,
         )
 
 
@@ -2967,6 +3022,18 @@ def create_ui() -> gr.Blocks:
                 scale=1
             ):
 
+                live_preview = gr.Image(
+                    label="live sampling preview",
+                    type="filepath",
+                    interactive=False,
+                    height=420,
+                )
+
+                gr.Markdown(
+                    "The preview updates while Krea 2 is sampling. "
+                    "The final metadata-preserving image appears in the output gallery."
+                )
+
                 gallery = gr.Gallery(
                     label="output",
                     columns=2,
@@ -3064,26 +3131,61 @@ def create_ui() -> gr.Blocks:
         def _generate_wrapper(
             *values,
         ):
-
+            """Run generation in a worker and yield live preview updates to Gradio."""
             base_values = values[:18]
-
             base_model_value = values[18]
-
             lora_values = values[19:]
+            lora_weights = _catalog_weights(list(lora_values))
 
+            preview_dir = pathlib.Path(tempfile.mkdtemp(prefix="krea2_live_preview_"))
+            preview_pointer = preview_dir / "latest_preview.txt"
+            result_holder: dict[str, Any] = {}
+            finished = threading.Event()
 
-            lora_weights = (
-                _catalog_weights(
-                    list(lora_values)
-                )
-            )
+            def _worker():
+                try:
+                    result_holder["result"] = generate(
+                        *base_values,
+                        base_model=base_model_value,
+                        lora_weights=lora_weights,
+                        live_preview_path=str(preview_pointer),
+                    )
+                except BaseException as exc:
+                    result_holder["error"] = exc
+                finally:
+                    finished.set()
 
+            worker = threading.Thread(target=_worker, name="krea2-generation", daemon=True)
+            worker.start()
+            last_preview = None
+            last_pointer_mtime = None
+            yield None, "Preparing workflow and starting generation…", base_values[15], None
 
-            return generate(
-                *base_values,
-                base_model=base_model_value,
-                lora_weights=lora_weights,
-            )
+            while not finished.wait(0.35):
+                try:
+                    if preview_pointer.exists():
+                        pointer_mtime = preview_pointer.stat().st_mtime_ns
+                        if pointer_mtime != last_pointer_mtime:
+                            candidate = pathlib.Path(preview_pointer.read_text(encoding="utf-8").strip())
+                            if candidate.is_file():
+                                last_preview = str(candidate)
+                                last_pointer_mtime = pointer_mtime
+                                yield None, "Generating — live sampling preview updating…", base_values[15], last_preview
+                except (OSError, ValueError) as preview_exc:
+                    print(f"[preview] polling error: {preview_exc}", flush=True)
+
+            worker.join()
+            if "error" in result_holder:
+                # Preserve Gradio's normal error display for generation failures.
+                shutil.rmtree(preview_dir, ignore_errors=True)
+                raise result_holder["error"]
+
+            output_paths, final_status, effective_seed = result_holder["result"]
+            final_preview = output_paths[0] if output_paths else last_preview
+            # The final preview points to the durable metadata-preserving output,
+            # so the temporary intermediate frames can now be removed.
+            shutil.rmtree(preview_dir, ignore_errors=True)
+            yield output_paths, final_status, effective_seed, final_preview
 
 
         generation_inputs = [
@@ -3127,6 +3229,7 @@ def create_ui() -> gr.Blocks:
                 gallery,
                 status,
                 used_seed,
+                live_preview,
             ],
         )
 
