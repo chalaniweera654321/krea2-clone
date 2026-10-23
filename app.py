@@ -2887,8 +2887,8 @@ def create_ui() -> gr.Blocks:
                         lora_slider_map[
                             filename
                         ] = gr.Slider(
-                            minimum=-3.0,
-                            maximum=3.0,
+                            minimum=-20.0,
+                            maximum=20.0,
                             value=0.0,
                             step=0.05,
                             label=filename,
